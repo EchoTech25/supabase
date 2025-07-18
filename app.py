@@ -48,11 +48,10 @@ def test_connection():
         print("Supabase client initialized successfully.")
         result_message += "Supabase client initialized successfully.\n"
 
-        # Attempt a query to a table that exists in every Supabase project: 'auth.users'.
-        # This will verify connectivity and basic authentication.
-        # We limit to 1 record to avoid fetching sensitive data or large amounts of data.
-        print("Attempting to query 'auth.users' table to verify connectivity...")
-        response = supabase.table('users').select('*').limit(1).execute() # 'users' is the public name for 'auth.users'
+        # Attempt a query to the 'auth.users' table using from_() method.
+        # This is the correct way to access tables in non-public schemas like 'auth'.
+        print("Attempting to query 'auth.users' table using from_() to verify connectivity...")
+        response = supabase.from_('users').select('*').limit(1).execute()
 
         # Check the response. If 'data' is present, the query was successful,
         # even if no users exist (in which case data will be an empty list).
