@@ -1,3 +1,5 @@
 Flask
 supabase
-gunicorn # Gunicorn is a WSGI HTTP server for Unix, required by Render for Python web services.
+gunicorn
+yfinance
+pandas
