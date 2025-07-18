@@ -29,7 +29,7 @@ def home():
 def test_connection():
     """
     Endpoint to test the Supabase connection.
-    It uses the logic from your original script.
+    It now attempts to query the 'auth.users' table, which exists in every Supabase project.
     """
     if not SUPABASE_URL or not SUPABASE_KEY:
         return jsonify({
@@ -48,20 +48,26 @@ def test_connection():
         print("Supabase client initialized successfully.")
         result_message += "Supabase client initialized successfully.\n"
 
-        # Attempt a simple query to verify the connection and authentication.
-        print("Attempting a dummy query to verify connectivity...")
-        response = supabase.table('test_connection_table').select('*').limit(1).execute()
+        # Attempt a query to a table that exists in every Supabase project: 'auth.users'.
+        # This will verify connectivity and basic authentication.
+        # We limit to 1 record to avoid fetching sensitive data or large amounts of data.
+        print("Attempting to query 'auth.users' table to verify connectivity...")
+        response = supabase.table('users').select('*').limit(1).execute() # 'users' is the public name for 'auth.users'
 
+        # Check the response. If 'data' is present, the query was successful,
+        # even if no users exist (in which case data will be an empty list).
         if response.data is not None:
-            result_message += f"Dummy query executed successfully. Response data: {response.data}\n"
-            result_message += "Successfully connected to Supabase!"
+            result_message += f"Query to 'auth.users' executed successfully. Response data (first record): {response.data}\n"
+            result_message += "Successfully connected to Supabase and performed a valid query!"
         else:
-            result_message += "Dummy query executed, but no data returned (table might not exist or be empty).\n"
-            result_message += "This indicates the connection to Supabase is likely successful."
+            # This case is less likely if the connection is truly successful,
+            # but included for robustness.
+            result_message += "Query to 'auth.users' executed, but no data returned or unexpected response structure.\n"
+            result_message += "This indicates the connection to Supabase is likely successful, but check the response structure."
 
     except Exception as e:
         result_message = f"Failed to connect to Supabase or execute query. Error: {e}\n"
-        result_message += "Please check your SUPABASE_URL, SUPABASE_KEY, and network connectivity."
+        result_message += "Please ensure your SUPABASE_URL and SUPABASE_KEY are correct, and check network connectivity."
         status_code = 500 # Indicate an internal server error
 
     return jsonify({
