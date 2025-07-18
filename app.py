@@ -147,8 +147,7 @@ def home():
 def run_ingestion():
     """
     Endpoint to trigger the data ingestion process.
-    This will fetch data for all tickers in tickers_to_use.txt,
-    skipping those it cannot find, and upload it to Supabase.
+    This will fetch data for the first ticker in tickers_to_use.txt and upload it to Supabase.
     """
     global supabase # Access the global supabase client
 
@@ -156,6 +155,10 @@ def run_ingestion():
     if supabase is None:
         try:
             supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+            # Optional: Test connection by trying to fetch a dummy row from a table
+            # You might need to create 'core.companies' table in your Supabase project
+            # if you want this initial test to pass without a 'relation does not exist' error.
+            # For now, we'll rely on the later upsert operations to confirm connection.
             print("Supabase client initialized.")
         except Exception as e:
             error_msg = f"Error initializing Supabase client: {e}"
@@ -163,9 +166,6 @@ def run_ingestion():
             return jsonify({"status": "error", "message": error_msg}), 500
 
     ingestion_results = []
-    skipped_tickers = []
-    successful_tickers = []
-    failed_tickers = []
 
     all_asx_tickers = get_asx_tickers_from_file(TICKER_FILE_PATH)
 
@@ -174,174 +174,162 @@ def run_ingestion():
         print(msg)
         return jsonify({"status": "error", "message": msg}), 400
 
-    # --- Iterate through all tickers ---
-    for ticker_symbol in all_asx_tickers:
-        ingestion_results.append(f"\n--- Processing Ticker: {ticker_symbol} ---")
-        print(f"\n--- Processing Ticker: {ticker_symbol} ---")
+    # --- Select only the first ticker for this test ---
+    ticker_symbol = all_asx_tickers[0]
+    ingestion_results.append(f"--- Processing FIRST Ticker: {ticker_symbol} ---")
+    print(f"\n--- Processing FIRST Ticker: {ticker_symbol} ---")
 
-        # --- Step 0: Ensure companies and securities exist in core tables ---
-        retries = 0
-        company_id = None
-        security_id = None
-        ticker_obj = None
+    # --- Step 0: Ensure companies and securities exist in core tables ---
+    retries = 0
+    company_id = None
+    security_id = None
+    ticker_obj = None # Initialize ticker_obj outside the loop
 
-        while retries < MAX_RETRIES:
-            try:
+    while retries < MAX_RETRIES:
+        try:
+            ticker_obj = yf.Ticker(ticker_symbol)
+            info = ticker_obj.info
+
+            # Check if info is empty, which can happen for invalid tickers
+            if not info:
+                raise ValueError(f"Could not fetch info for ticker {ticker_symbol}. It might be invalid.")
+
+            company_data = {
+                'ticker': ticker_symbol,
+                'company_name': info.get('longName') or info.get('shortName'),
+                'exchange': info.get('exchange'),
+                'sector': info.get('sector'),
+                'industry': info.get('industry'),
+                'country': info.get('country'),
+                'website': info.get('website'),
+                'description': info.get('longBusinessSummary')
+            }
+            # Ensure 'core.companies' table exists in your Supabase project
+            company_resp = supabase.table('core.companies').upsert(company_data, on_conflict='ticker').execute()
+            company_id = company_resp.data[0]['id'] if company_resp.data else None
+
+            if not company_id:
+                raise Exception(f"Failed to get company_id for {ticker_symbol}")
+
+            security_data = {
+                'company_id': str(company_id),
+                'symbol': ticker_symbol,
+                'security_type': 'COMMON_STOCK',
+                'currency': info.get('currency'),
+            }
+            # Ensure 'core.securities' table exists in your Supabase project
+            security_resp = supabase.table('core.securities').upsert(security_data, on_conflict='symbol').execute()
+            security_id = security_resp.data[0]['id'] if security_resp.data else None
+
+            if not security_id:
+                raise Exception(f"Failed to get security_id for {ticker_symbol}")
+
+            msg = f"Ensured core data for {ticker_symbol} (Company ID: {company_id}, Security ID: {security_id})."
+            ingestion_results.append(msg)
+            print(msg)
+            break
+        except Exception as e:
+            msg = f"Error ensuring core data for {ticker_symbol}: {e}"
+            ingestion_results.append(msg)
+            print(msg)
+            retries += 1
+            time.sleep(RETRY_DELAY_SECONDS)
+    if retries == MAX_RETRIES:
+        msg = f"Failed to ensure core data for {ticker_symbol} after {MAX_RETRIES} retries. Aborting ingestion for this ticker."
+        ingestion_results.append(msg)
+        print(msg)
+        return jsonify({"status": "error", "message": "\n".join(ingestion_results)}), 500 # Exit early if core data fails
+
+    # --- Fetch and Upload Financial Statements ---
+    ingestion_results.append(f"\nFetching financial statements for {ticker_symbol}...")
+    print(f"\nFetching financial statements for {ticker_symbol}...")
+
+    # --- Income Statement (Annual) ---
+    ingestion_results.append("\n--- Processing Income Statement (Annual) ---")
+    print("\n--- Processing Income Statement (Annual) ---")
+    retries = 0
+    while retries < MAX_RETRIES:
+        try:
+            if ticker_obj is None: # Ensure ticker_obj is available
                 ticker_obj = yf.Ticker(ticker_symbol)
-                info = ticker_obj.info
-
-                # Check if info is empty, which can happen for invalid tickers
-                if not info or not info.get('longName'): # Check for longName as a basic indicator of valid info
-                    raise ValueError(f"Could not fetch info for ticker {ticker_symbol}. It might be invalid or delisted.")
-
-                company_data = {
-                    'ticker': ticker_symbol,
-                    'company_name': info.get('longName') or info.get('shortName'),
-                    'exchange': info.get('exchange'),
-                    'sector': info.get('sector'),
-                    'industry': info.get('industry'),
-                    'country': info.get('country'),
-                    'website': info.get('website'),
-                    'description': info.get('longBusinessSummary')
-                }
-                company_resp = supabase.table('core.companies').upsert(company_data, on_conflict='ticker').execute()
-                company_id = company_resp.data[0]['id'] if company_resp.data else None
-
-                if not company_id:
-                    raise Exception(f"Failed to get company_id for {ticker_symbol} after upsert.")
-
-                security_data = {
-                    'company_id': str(company_id),
-                    'symbol': ticker_symbol,
-                    'security_type': 'COMMON_STOCK',
-                    'currency': info.get('currency'),
-                }
-                security_resp = supabase.table('core.securities').upsert(security_data, on_conflict='symbol').execute()
-                security_id = security_resp.data[0]['id'] if security_resp.data else None
-
-                if not security_id:
-                    raise Exception(f"Failed to get security_id for {ticker_symbol} after upsert.")
-
-                msg = f"Ensured core data for {ticker_symbol} (Company ID: {company_id}, Security ID: {security_id})."
-                ingestion_results.append(msg)
-                print(msg)
-                break # Exit retry loop on success
-            except Exception as e:
-                msg = f"Error ensuring core data for {ticker_symbol}: {e}"
-                ingestion_results.append(msg)
-                print(msg)
-                retries += 1
-                time.sleep(RETRY_DELAY_SECONDS)
-        
-        if retries == MAX_RETRIES:
-            msg = f"Failed to ensure core data for {ticker_symbol} after {MAX_RETRIES} retries. Skipping this ticker."
+            income_stmt_annual = ticker_obj.financials
+            income_stmt_records = prepare_dynamic_financial_data(income_stmt_annual, security_id, fiscal_quarter=None)
+            # Ensure 'financials.income_statements_annual' table exists in your Supabase project
+            upload_res = upload_data_to_supabase('financials.income_statements_annual', income_stmt_records, ['security_id', 'fiscal_year', 'fiscal_quarter'])
+            ingestion_results.append(upload_res['message'])
+            if upload_res['status'] != 'error':
+                break
+        except Exception as e:
+            msg = f"Error fetching/uploading Income Statement for {ticker_symbol}: {e}"
             ingestion_results.append(msg)
             print(msg)
-            skipped_tickers.append(ticker_symbol)
-            continue # Move to the next ticker in the list
+            retries += 1
+            time.sleep(RETRY_DELAY_SECONDS)
+    if retries == MAX_RETRIES:
+        msg = f"Failed to fetch/upload Income Statement for {ticker_symbol} after {MAX_RETRIES} retries."
+        ingestion_results.append(msg)
+        print(msg)
+    time.sleep(REQUEST_DELAY_SECONDS) # Delay for rate limiting
 
-        # --- Fetch and Upload Financial Statements ---
-        ingestion_results.append(f"\nFetching financial statements for {ticker_symbol}...")
-        print(f"\nFetching financial statements for {ticker_symbol}...")
-        
-        ticker_processing_status = "success" # Assume success for this ticker's financials
-
-        # --- Income Statement (Annual) ---
-        ingestion_results.append("\n--- Processing Income Statement (Annual) ---")
-        print("\n--- Processing Income Statement (Annual) ---")
-        retries = 0
-        while retries < MAX_RETRIES:
-            try:
-                income_stmt_annual = ticker_obj.financials
-                income_stmt_records = prepare_dynamic_financial_data(income_stmt_annual, security_id, fiscal_quarter=None)
-                upload_res = upload_data_to_supabase('financials.income_statements_annual', income_stmt_records, ['security_id', 'fiscal_year', 'fiscal_quarter'])
-                ingestion_results.append(upload_res['message'])
-                if upload_res['status'] == 'error':
-                    ticker_processing_status = "partial_failure" # Mark as partial failure
+    # --- Balance Sheet (Annual) ---
+    ingestion_results.append("\n--- Processing Balance Sheet (Annual) ---")
+    print("\n--- Processing Balance Sheet (Annual) ---")
+    retries = 0
+    while retries < MAX_RETRIES:
+        try:
+            if ticker_obj is None: # Ensure ticker_obj is available
+                ticker_obj = yf.Ticker(ticker_symbol)
+            balance_sheet_annual = ticker_obj.balance_sheet
+            balance_sheet_records = prepare_dynamic_financial_data(balance_sheet_annual, security_id, fiscal_quarter=None)
+            # Ensure 'financials.balance_sheets_annual' table exists in your Supabase project
+            upload_res = upload_data_to_supabase('financials.balance_sheets_annual', balance_sheet_records, ['security_id', 'fiscal_year', 'fiscal_quarter'])
+            ingestion_results.append(upload_res['message'])
+            if upload_res['status'] != 'error':
                 break
-            except Exception as e:
-                msg = f"Error fetching/uploading Income Statement for {ticker_symbol}: {e}"
-                ingestion_results.append(msg)
-                print(msg)
-                retries += 1
-                time.sleep(RETRY_DELAY_SECONDS)
-        if retries == MAX_RETRIES:
-            msg = f"Failed to fetch/upload Income Statement for {ticker_symbol} after {MAX_RETRIES} retries."
+        except Exception as e:
+            msg = f"Error fetching/uploading Balance Sheet for {ticker_symbol}: {e}"
             ingestion_results.append(msg)
             print(msg)
-            ticker_processing_status = "partial_failure"
-        time.sleep(REQUEST_DELAY_SECONDS) # Delay for rate limiting
+            retries += 1
+            time.sleep(RETRY_DELAY_SECONDS)
+    if retries == MAX_RETRIES:
+        msg = f"Failed to fetch/upload Balance Sheet for {ticker_symbol} after {MAX_RETRIES} retries."
+        ingestion_results.append(msg)
+        print(msg)
+    time.sleep(REQUEST_DELAY_SECONDS)
 
-        # --- Balance Sheet (Annual) ---
-        ingestion_results.append("\n--- Processing Balance Sheet (Annual) ---")
-        print("\n--- Processing Balance Sheet (Annual) ---")
-        retries = 0
-        while retries < MAX_RETRIES:
-            try:
-                balance_sheet_annual = ticker_obj.balance_sheet
-                balance_sheet_records = prepare_dynamic_financial_data(balance_sheet_annual, security_id, fiscal_quarter=None)
-                upload_res = upload_data_to_supabase('financials.balance_sheets_annual', balance_sheet_records, ['security_id', 'fiscal_year', 'fiscal_quarter'])
-                ingestion_results.append(upload_res['message'])
-                if upload_res['status'] == 'error':
-                    ticker_processing_status = "partial_failure"
+    # --- Cash Flow (Annual) ---
+    ingestion_results.append("\n--- Processing Cash Flow (Annual) ---")
+    print("\n--- Processing Cash Flow (Annual) ---")
+    retries = 0
+    while retries < MAX_RETRIES:
+        try:
+            if ticker_obj is None: # Ensure ticker_obj is available
+                ticker_obj = yf.Ticker(ticker_symbol)
+            cash_flow_annual = ticker_obj.cashflow
+            cash_flow_records = prepare_dynamic_financial_data(cash_flow_annual, security_id, fiscal_quarter=None)
+            # Ensure 'financials.cash_flows_annual' table exists in your Supabase project
+            upload_res = upload_data_to_supabase('financials.cash_flows_annual', cash_flow_records, ['security_id', 'fiscal_year', 'fiscal_quarter'])
+            ingestion_results.append(upload_res['message'])
+            if upload_res['status'] != 'error':
                 break
-            except Exception as e:
-                msg = f"Error fetching/uploading Balance Sheet for {ticker_symbol}: {e}"
-                ingestion_results.append(msg)
-                print(msg)
-                retries += 1
-                time.sleep(RETRY_DELAY_SECONDS)
-        if retries == MAX_RETRIES:
-            msg = f"Failed to fetch/upload Balance Sheet for {ticker_symbol} after {MAX_RETRIES} retries."
+        except Exception as e:
+            msg = f"Error fetching/uploading Cash Flow for {ticker_symbol}: {e}"
             ingestion_results.append(msg)
             print(msg)
-            ticker_processing_status = "partial_failure"
-        time.sleep(REQUEST_DELAY_SECONDS)
+            retries += 1
+            time.sleep(RETRY_DELAY_SECONDS)
+    if retries == MAX_RETRIES:
+        msg = f"Failed to fetch/upload Cash Flow for {ticker_symbol} after {MAX_RETRIES} retries."
+        ingestion_results.append(msg)
+        print(msg)
+    time.sleep(REQUEST_DELAY_SECONDS)
 
-        # --- Cash Flow (Annual) ---
-        ingestion_results.append("\n--- Processing Cash Flow (Annual) ---")
-        print("\n--- Processing Cash Flow (Annual) ---")
-        retries = 0
-        while retries < MAX_RETRIES:
-            try:
-                cash_flow_annual = ticker_obj.cashflow
-                cash_flow_records = prepare_dynamic_financial_data(cash_flow_annual, security_id, fiscal_quarter=None)
-                upload_res = upload_data_to_supabase('financials.cash_flows_annual', cash_flow_records, ['security_id', 'fiscal_year', 'fiscal_quarter'])
-                ingestion_results.append(upload_res['message'])
-                if upload_res['status'] == 'error':
-                    ticker_processing_status = "partial_failure"
-                break
-            except Exception as e:
-                msg = f"Error fetching/uploading Cash Flow for {ticker_symbol}: {e}"
-                ingestion_results.append(msg)
-                print(msg)
-                retries += 1
-                time.sleep(RETRY_DELAY_SECONDS)
-        if retries == MAX_RETRIES:
-            msg = f"Failed to fetch/upload Cash Flow for {ticker_symbol} after {MAX_RETRIES} retestion_results.append(msg)
-            print(msg)
-            ticker_processing_status = "partial_failure"
-        time.sleep(REQUEST_DELAY_SECONDS)
+    final_message = f"\n--- Data ingestion for {ticker_symbol} complete. ---"
+    ingestion_results.append(final_message)
+    print(final_message)
 
-        if ticker_processing_status == "success":
-            successful_tickers.append(ticker_symbol)
-        else:
-            failed_tickers.append(ticker_symbol) # This means core data succeeded but some financials failed
-
-    final_summary = "\n--- Ingestion Summary ---"
-    final_summary += f"\nTotal tickers processed: {len(all_asx_tickers)}"
-    final_summary += f"\nSuccessfully processed (all financials): {len(successful_tickers)} - {', '.join(successful_tickers) or 'None'}"
-    final_summary += f"\nPartially failed (core data OK, some financials failed): {len(failed_tickers)} - {', '.join(failed_tickers) or 'None'}"
-    final_summary += f"\nSkipped (yfinance data not found): {len(skipped_tickers)} - {', '.join(skipped_tickers) or 'None'}"
-    ingestion_results.append(final_summary)
-    print(final_summary)
-
-    # Determine overall status for the API response
-    overall_status = "success"
-    if skipped_tickers or failed_tickers:
-        overall_status = "partial_success" if successful_tickers else "error"
-
-    return jsonify({"status": overall_status, "message": "\n".join(ingestion_results)}), 200
+    return jsonify({"status": "success", "message": "\n".join(ingestion_results)}), 200
 
 if __name__ == '__main__':
     # Run the Flask app for local testing
