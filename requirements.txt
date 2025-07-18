@@ -1,0 +1,3 @@
+Flask
+supabase-py
+gunicorn # Gunicorn is a WSGI HTTP server for Unix, required by Render for Python web services.
